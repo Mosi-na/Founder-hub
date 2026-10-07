@@ -103,6 +103,7 @@ export interface Application {
   note?: string;
   createdAt: string;
   status?: ApplicationStatus;
+  resumePath?: string;
 }
 
 

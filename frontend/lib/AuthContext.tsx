@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { getMyProfile, saveMyProfile } from "@/lib/api";
 import type { AuthUser, UserRole, StudentProfile, FounderProfile, EdcProfile } from "@/types";
 
 export const DEMO_USERS: Record<UserRole, AuthUser> = {
@@ -135,7 +136,7 @@ interface AuthContextType {
   register: (user: AuthUser, password?: string) => Promise<AuthResult>;
   logout: () => Promise<void>;
   switchRole: (newRole: UserRole) => void;
-  updateProfile: (updated: Partial<AuthUser>) => void;
+  updateProfile: (updated: Partial<AuthUser>) => Promise<AuthResult>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -201,46 +202,59 @@ function mapSupabaseUserToAuthUser(user: {
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [registeredStudents, setRegisteredStudents] = useState<AuthUser[]>(SEED_TALENT_STUDENTS);
+  // Hydrate from localStorage synchronously so isLoading=false immediately
+  const [user, setUser] = useState<AuthUser | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_USER);
+      return stored ? (JSON.parse(stored) as AuthUser) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // isLoading starts false because we already have a value from localStorage.
+  // It's only briefly true during the background Supabase refresh.
+  const [isLoading, setIsLoading] = useState(false);
+
+  const [registeredStudents, setRegisteredStudents] = useState<AuthUser[]>(() => {
+    if (typeof window === "undefined") return SEED_TALENT_STUDENTS;
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY_STUDENTS);
+      const parsed = stored ? JSON.parse(stored) : null;
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed : SEED_TALENT_STUDENTS;
+    } catch {
+      return SEED_TALENT_STUDENTS;
+    }
+  });
 
   useEffect(() => {
     let isMounted = true;
 
-    const hydrate = async () => {
+    // Background refresh from Supabase (doesn't block initial render)
+    const refreshFromSupabase = async () => {
       try {
-        const storedStudents = localStorage.getItem(STORAGE_KEY_STUDENTS);
-        if (storedStudents) {
-          try {
-            const parsed = JSON.parse(storedStudents);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              if (isMounted) setRegisteredStudents(parsed);
-            }
-          } catch {
-            // ignore corrupted JSON
-          }
-        }
-
-        const storedUser = localStorage.getItem(STORAGE_KEY_USER);
-        if (storedUser && isMounted) {
-          setUser(JSON.parse(storedUser));
-        }
-
         const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user && isMounted) {
-          const mapped = mapSupabaseUserToAuthUser(session.user, session.user.user_metadata?.role as UserRole);
+        if (!isMounted) return;
+
+        if (session?.user) {
+          const mapped = await getMyProfile().catch(() =>
+            mapSupabaseUserToAuthUser(session.user, session.user.user_metadata?.role as UserRole)
+          );
+          if (!isMounted) return;
           setUser(mapped);
           localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(mapped));
+        } else if (!session) {
+          // No active session — clear stale localStorage user
+          setUser(null);
+          localStorage.removeItem(STORAGE_KEY_USER);
         }
       } catch {
-        // ignore hydration errors
-      } finally {
-        if (isMounted) setIsLoading(false);
+        // silently ignore — localStorage user is already shown
       }
     };
 
-    hydrate();
+    refreshFromSupabase();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!isMounted) return;
@@ -295,7 +309,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return { success: false, message: "Unable to start a session. Please try again." };
       }
 
-      const mappedUser = mapSupabaseUserToAuthUser(data.user, role ?? (data.user.user_metadata?.role as UserRole));
+      const mappedUser = await getMyProfile().catch(() =>
+        mapSupabaseUserToAuthUser(data.user, role ?? (data.user.user_metadata?.role as UserRole))
+      );
       persistUser(mappedUser);
       return { success: true };
     } catch (error: any) {
@@ -384,9 +400,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     persistUser(demo);
   };
 
-  const updateProfile = (updated: Partial<AuthUser>) => {
-    if (!user) return;
+  const updateProfile = async (updated: Partial<AuthUser>): Promise<AuthResult> => {
+    if (!user) return { success: false, message: "Sign in before updating your profile." };
     const next = { ...user, ...updated };
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user.id === user.id) {
+      try {
+        const saved = await saveMyProfile(next);
+        persistUser(saved);
+        return { success: true };
+      } catch (error: any) {
+        return { success: false, message: error?.message || "Could not save your profile to Supabase." };
+      }
+    }
+
     persistUser(next);
 
     if (next.role === "student") {
@@ -396,6 +424,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.setItem(STORAGE_KEY_STUDENTS, JSON.stringify(updatedList));
       }
     }
+
+    return { success: true };
   };
 
   return (

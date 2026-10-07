@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import type { Requirement } from "@/types";
 import { useAuth } from "@/lib/AuthContext";
-import { submitApplication } from "@/lib/api";
+import { getApplicationResumeUrl, submitApplication, uploadApplicationResume } from "@/lib/api";
+import { supabase } from "@/lib/supabase";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -55,6 +56,9 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
   const [portfolioUrl, setPortfolioUrl] = useState(user?.studentProfile?.portfolioUrl || "");
   const [note, setNote] = useState("");
   const [applied, setApplied] = useState(false);
+  const [resume, setResume] = useState<File | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
 
   const handleOpenModal = () => {
     if (user) {
@@ -82,7 +86,7 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
     ? { bg: "rgba(184,149,104,0.12)", text: "var(--color-champagne-gold)", border: "rgba(184,149,104,0.25)" }
     : { bg: "rgba(157,98,95,0.12)", text: "var(--color-blush-suede)", border: "rgba(157,98,95,0.25)" };
 
-  const handleApplySubmit = (e: React.FormEvent) => {
+  const handleApplySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const finalEmail = user?.email || applicantEmail;
     const finalName = name || user?.name || "Student Applicant";
@@ -92,24 +96,42 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
       return;
     }
 
-    submitApplication(requirement.id, finalName, finalEmail, {
-      roleTitle: requirement.role,
-      companyName: requirement.company,
-      founderEmail: requirement.founderEmail,
-      department: department || user?.studentProfile?.department,
-      college: user?.studentProfile?.college,
-      linkedinUrl: linkedinUrl || user?.studentProfile?.linkedinUrl,
-      githubUrl: githubUrl || user?.studentProfile?.githubUrl,
-      portfolioUrl: portfolioUrl || user?.studentProfile?.portfolioUrl,
-      skills: user?.studentProfile?.skills,
-      note,
-    });
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session || session.user.id !== user?.id) {
+      setSubmitError("Sign in with your account before applying.");
+      return;
+    }
+    if (resume && (resume.type !== "application/pdf" || resume.size > 5 * 1024 * 1024)) {
+      setSubmitError("Choose a PDF resume smaller than 5 MB.");
+      return;
+    }
 
-    setApplied(true);
-    setTimeout(() => {
-      setOpen(false);
-      setApplied(false);
-    }, 1800);
+    setSubmitting(true);
+    setSubmitError("");
+    try {
+      const application = await submitApplication(requirement.id, finalName, finalEmail, {
+        roleTitle: requirement.role,
+        companyName: requirement.company,
+        founderEmail: requirement.founderEmail,
+        department: department || user?.studentProfile?.department,
+        college: user?.studentProfile?.college,
+        linkedinUrl: linkedinUrl || user?.studentProfile?.linkedinUrl,
+        githubUrl: githubUrl || user?.studentProfile?.githubUrl,
+        portfolioUrl: portfolioUrl || user?.studentProfile?.portfolioUrl,
+        skills: user?.studentProfile?.skills,
+        note,
+      });
+      if (resume) await uploadApplicationResume(application.id, resume);
+      setApplied(true);
+      setTimeout(() => {
+        setOpen(false);
+        setApplied(false);
+      }, 1800);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Could not submit your application.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -336,18 +358,33 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
                     placeholder="Describe your relevant projects and passion for this startup..."
                     className="mt-1 text-xs" style={{ borderColor: "var(--border)" }} />
                 </div>
+
+                <div>
+                  <label className="text-xs font-semibold" style={{ color: "var(--color-black-leather)" }}>
+                    Resume (PDF, max 5 MB)
+                  </label>
+                  <Input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    onChange={(event) => setResume(event.target.files?.[0] ?? null)}
+                    className="mt-1 text-xs"
+                    style={{ borderColor: "var(--border)" }}
+                  />
+                </div>
               </div>
+
+              {submitError && <p role="alert" className="mt-3 text-xs text-red-700">{submitError}</p>}
 
               <div className="mt-5">
                 <button
                   type="submit"
-                  disabled={applied}
+                  disabled={applied || submitting}
                   className="flex w-full items-center justify-center gap-2 rounded-xl py-2.5 text-xs font-bold transition-all duration-200"
                   style={{
                     background: applied ? "#2e7d32" : "var(--color-champagne-gold)",
                     color: applied ? "#ffffff" : "var(--color-black-leather)",
                     border: "1px solid " + (applied ? "#2e7d32" : "var(--color-champagne-gold)"),
-                    cursor: applied ? "default" : "pointer",
+                    cursor: applied || submitting ? "default" : "pointer",
                   }}
                   onMouseEnter={e => {
                     if (!applied) (e.currentTarget as HTMLElement).style.background = "var(--color-champagne-dark)";
@@ -361,7 +398,7 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
                     </>
                   ) : (
                     <>
-                      <Briefcase size={14} /> Submit Application
+                      <Briefcase size={14} /> {submitting ? "Submitting..." : "Submit Application"}
                     </>
                   )}
                 </button>

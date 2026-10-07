@@ -9,7 +9,7 @@ import {
   Landmark, Rocket, AlertCircle,
 } from "lucide-react";
 import { useAuth } from "@/lib/AuthContext";
-import { getMyApplications, getApplicationsByFounder, getRequirements, updateApplicationStatus } from "@/lib/api";
+import { getMyApplications, getApplicationsByFounder, getApplicationResumeUrl, getRequirements, updateApplicationStatus } from "@/lib/api";
 import type { Application, ApplicationStatus, Requirement } from "@/types";
 
 const TRACKING_STEPS = [
@@ -407,6 +407,7 @@ function ApplicantCard({ app, onStatusChange }: {
   app: Application;
   onStatusChange: (appId: string, status: "Reviewing" | "Interviewing" | "Accepted" | "Rejected") => void;
 }) {
+  const [resumeLoading, setResumeLoading] = useState(false);
   const colorIdx = app.applicantName.charCodeAt(0) % 6;
   const avatarColors = ["#0B5D3B", "#267A56", "#B38E60", "#9D625F", "#4A7FA5", "#7B5EA7"];
   const effectiveStatus = (app.status === "Selected" ? "Accepted" : app.status) ?? "Reviewing";
@@ -418,6 +419,18 @@ function ApplicantCard({ app, onStatusChange }: {
     Rejected:     { bg: "rgba(157,98,95,0.12)",   text: "#9D625F",                              border: "rgba(157,98,95,0.35)" },
   };
   const sc = statusConfig[effectiveStatus] ?? statusConfig["Reviewing"];
+
+  const openResume = async () => {
+    setResumeLoading(true);
+    try {
+      const url = await getApplicationResumeUrl(app.id);
+      window.location.assign(url);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Could not open the resume.");
+    } finally {
+      setResumeLoading(false);
+    }
+  };
 
   return (
     <div className="overflow-hidden rounded-2xl transition-all duration-200"
@@ -517,6 +530,14 @@ function ApplicantCard({ app, onStatusChange }: {
               </a>
             )}
           </div>
+        )}
+
+        {app.resumePath && (
+          <button type="button" onClick={openResume} disabled={resumeLoading}
+            className="mt-3 inline-flex w-fit items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:opacity-60"
+            style={{ background: "var(--surface-green)", color: "var(--secondary)", border: "1px solid var(--border)" }}>
+            <FileText size={12} /> {resumeLoading ? "Opening..." : "View resume"}
+          </button>
         )}
 
         <div className="mt-5 pt-4" style={{ borderTop: "1px solid var(--divider)" }}>

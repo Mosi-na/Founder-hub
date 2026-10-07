@@ -24,13 +24,16 @@ export default function DashboardPage() {
   const { user, role } = useAuth();
   const [requirements, setRequirements] = useState<Requirement[]>([]);
   const [startups, setStartups] = useState<Startup[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
 
   useEffect(() => {
+    setDataLoading(true);
     Promise.all([getRequirements(), getStartups()]).then(([reqs, stps]) => {
       setRequirements(reqs);
       setStartups(stps);
-    });
+      setDataLoading(false);
+    }).catch(() => setDataLoading(false));
   }, []);
 
   const open = requirements.filter((r) => r.status === "OPEN").length;
@@ -122,18 +125,29 @@ export default function DashboardPage() {
 
       {/* Metrics Row */}
       <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <Card className="border-solid bg-white p-5 text-center shadow-xs">
-          <p className="font-serif text-3xl font-bold text-ink">{requirements.length}</p>
-          <p className="mt-1 text-xs text-char/70 font-semibold">Total Requisitions Filed</p>
-        </Card>
-        <Card className="border-solid bg-white p-5 text-center shadow-xs">
-          <p className="font-serif text-3xl font-bold text-sage">{open}</p>
-          <p className="mt-1 text-xs text-char/70 font-semibold">Currently Open for Applications</p>
-        </Card>
-        <Card className="border-solid bg-white p-5 text-center shadow-xs">
-          <p className="font-serif text-3xl font-bold text-mustard">{startups.length}</p>
-          <p className="mt-1 text-xs text-char/70 font-semibold">Active Startups Hiring</p>
-        </Card>
+        {dataLoading ? (
+          [0,1,2].map((i) => (
+            <Card key={i} className="border-solid bg-white p-5 text-center shadow-xs">
+              <div className="mx-auto mb-2 h-8 w-16 animate-pulse rounded-lg bg-gray-200" />
+              <div className="mx-auto h-3 w-28 animate-pulse rounded bg-gray-100" />
+            </Card>
+          ))
+        ) : (
+          <>
+            <Card className="border-solid bg-white p-5 text-center shadow-xs">
+              <p className="font-serif text-3xl font-bold text-ink">{requirements.length}</p>
+              <p className="mt-1 text-xs text-char/70 font-semibold">Total Requisitions Filed</p>
+            </Card>
+            <Card className="border-solid bg-white p-5 text-center shadow-xs">
+              <p className="font-serif text-3xl font-bold text-sage">{open}</p>
+              <p className="mt-1 text-xs text-char/70 font-semibold">Currently Open for Applications</p>
+            </Card>
+            <Card className="border-solid bg-white p-5 text-center shadow-xs">
+              <p className="font-serif text-3xl font-bold text-mustard">{startups.length}</p>
+              <p className="mt-1 text-xs text-char/70 font-semibold">Active Startups Hiring</p>
+            </Card>
+          </>
+        )}
       </div>
 
       {/* Action Links */}

@@ -28,6 +28,7 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
   const { user, role, updateProfile } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   // Student profile edit state
   const [name, setName] = useState(user?.name || "");
@@ -57,8 +58,10 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
 
   if (!isOpen || !user) return null;
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveError("");
+    let updated: Parameters<typeof updateProfile>[0] = { name };
 
     if (role === "student") {
       const skillsArray = skillsStr
@@ -66,7 +69,7 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
         .map((s) => s.trim())
         .filter(Boolean);
 
-      updateProfile({
+      updated = {
         name,
         studentProfile: {
           ...user.studentProfile,
@@ -81,9 +84,9 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
           bio,
           skills: skillsArray.length > 0 ? skillsArray : user.studentProfile?.skills || [],
         },
-      });
+      };
     } else if (role === "founder") {
-      updateProfile({
+      updated = {
         name,
         founderProfile: {
           ...user.founderProfile,
@@ -94,9 +97,9 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
           websiteUrl,
           linkedinUrl,
         },
-      });
+      };
     } else if (role === "edc") {
-      updateProfile({
+      updated = {
         name,
         edcProfile: {
           ...user.edcProfile,
@@ -106,7 +109,13 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
           portalUrl,
           linkedinUrl,
         },
-      });
+      };
+    }
+
+    const result = await updateProfile(updated);
+    if (!result.success) {
+      setSaveError(result.message || "Could not save your profile.");
+      return;
     }
 
     setIsEditing(false);
@@ -188,6 +197,7 @@ export function UserProfileModal({ isOpen, onClose }: { isOpen: boolean; onClose
                   <Check size={13} /> Profile updated successfully!
                 </p>
               )}
+              {saveError && <p className="mt-1 text-xs font-semibold text-red-700">{saveError}</p>}
             </div>
           </div>
 

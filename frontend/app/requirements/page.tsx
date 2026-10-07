@@ -16,9 +16,16 @@ export default function RequirementsPage() {
   const [view, setView] = useState<"student" | "founder">("student");
   const [requirements, setRequirements] = useState<Requirement[]>([]);
   const [filter, setFilter] = useState<FilterValue>("ALL");
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => { setView(role === "founder" ? "founder" : "student"); }, [role]);
-  useEffect(() => { getRequirements().then(setRequirements); }, []);
+  useEffect(() => {
+    setIsLoading(true);
+    getRequirements().then((data) => {
+      setRequirements(data);
+      setIsLoading(false);
+    }).catch(() => setIsLoading(false));
+  }, []);
 
   const filtered = useMemo(() => {
     if (filter === "ALL") return requirements;
@@ -157,7 +164,22 @@ export default function RequirementsPage() {
             )}
           </div>
 
-          {filtered.length === 0 ? (
+          {isLoading ? (
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+              {[0,1,2,3,4,5].map((i) => (
+                <div key={i} className="rounded-2xl border p-5 animate-pulse"
+                  style={{ background: "var(--surface)", borderColor: "var(--border)" }}>
+                  <div className="mb-3 h-4 w-3/4 rounded bg-gray-200" />
+                  <div className="mb-2 h-3 w-1/2 rounded bg-gray-100" />
+                  <div className="mb-4 h-3 w-2/3 rounded bg-gray-100" />
+                  <div className="flex gap-2">
+                    <div className="h-5 w-14 rounded-full bg-gray-200" />
+                    <div className="h-5 w-14 rounded-full bg-gray-200" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="rounded-2xl py-16 text-center"
               style={{
                 border: "1.5px dashed var(--border)",

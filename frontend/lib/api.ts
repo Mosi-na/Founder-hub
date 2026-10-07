@@ -1,12 +1,47 @@
-import type { Requirement, Startup, NewRequirementInput, Application } from "@/types";
-
-const STORAGE_KEY_APPLICATIONS = "fnd_req_applications";
+import type { AuthUser, Requirement, Startup, NewRequirementInput, Application } from "@/types";
+import { supabase } from "@/lib/supabase";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000/api";
-const STORAGE_KEY_REQUIREMENTS = "fnd_req_stored_requirements_v2";
 
+// ─── Simple in-memory TTL cache (30 s) for GET requests ───────────────────────
+const _cache = new Map<string, { data: unknown; expiresAt: number }>();
+const CACHE_TTL_MS = 30_000;
 
-const seedRequirements: Requirement[] = [
+function getCached<T>(key: string): T | null {
+  const entry = _cache.get(key);
+  if (entry && entry.expiresAt > Date.now()) return entry.data as T;
+  _cache.delete(key);
+  return null;
+}
+
+function setCached(key: string, data: unknown) {
+  _cache.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+export function invalidateCache(key?: string) {
+  if (key) _cache.delete(key);
+  else _cache.clear();
+}
+
+// ─── Singleton session promise – avoid one supabase round-trip per request ────
+let _sessionPromise: Promise<string | null> | null = null;
+
+function getAccessToken(): Promise<string | null> {
+  if (_sessionPromise) return _sessionPromise;
+  _sessionPromise = supabase.auth
+    .getSession()
+    .then(({ data }) => data.session?.access_token ?? null)
+    .finally(() => {
+      // Reset after 10 s so tokens are never stale
+      setTimeout(() => { _sessionPromise = null; }, 10_000);
+    });
+  return _sessionPromise;
+}
+
+// Invalidate the token singleton on auth state change
+supabase.auth.onAuthStateChange(() => { _sessionPromise = null; });
+
+const fallbackRequirements: Requirement[] = [
   {
     id: "REQ-014",
     company: "Ash & Bolt",
@@ -116,7 +151,7 @@ const seedRequirements: Requirement[] = [
   },
 ];
 
-const seedStartups: Startup[] = [
+const fallbackStartups: Startup[] = [
   {
     id: "ashbolt",
     name: "Ash & Bolt",
@@ -169,106 +204,104 @@ const seedStartups: Startup[] = [
   },
 ];
 
-function getStoredRequirements(): Requirement[] {
-  if (typeof window !== "undefined") {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY_REQUIREMENTS);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // fallback
-    }
+async function request<T>(path: string, init: RequestInit = {}, opts?: { cache?: boolean }): Promise<T> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const isGet = method === "GET";
+
+  // Return cached result for GET requests when caller opts in (or by default)
+  const useCache = opts?.cache !== false && isGet;
+  if (useCache) {
+    const hit = getCached<T>(path);
+    if (hit !== null) return hit;
   }
-  return seedRequirements;
+
+  // Reuse in-flight session promise instead of making a fresh call every time
+  const accessToken = await getAccessToken();
+
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+
+  if (!response.ok) {
+    const payload = await response.text().catch(() => "");
+    throw new Error(payload || `Request failed with status ${response.status}`);
+  }
+
+  const data = await response.json() as T;
+
+  if (useCache) setCached(path, data);
+  return data;
 }
 
-function saveStoredRequirements(reqs: Requirement[]) {
-  if (typeof window !== "undefined") {
-    try {
-      localStorage.setItem(STORAGE_KEY_REQUIREMENTS, JSON.stringify(reqs));
-    } catch {
-      // ignore
-    }
-  }
+export async function getMyProfile(): Promise<AuthUser> {
+  return request<AuthUser>("/profile");
+}
+
+export async function saveMyProfile(profile: Partial<AuthUser>): Promise<AuthUser> {
+  invalidateCache("/profile");
+  return request<AuthUser>("/profile", {
+    method: "PUT",
+    body: JSON.stringify(profile),
+  });
 }
 
 // Returns ONLY approved requirements for student/public browsing
 export async function getRequirements(includeAll = false): Promise<Requirement[]> {
-  const all = getStoredRequirements();
-  if (includeAll) return all;
-  return all.filter((r) => r.approvalStatus === "APPROVED");
+  try {
+    const query = includeAll ? "?includeAll=true" : "";
+    const response = await request<Requirement[]>(`/requirements${query}`);
+    return Array.isArray(response) ? response : fallbackRequirements;
+  } catch {
+    return includeAll ? fallbackRequirements : fallbackRequirements.filter((item) => item.approvalStatus === "APPROVED");
+  }
 }
 
 // Returns all requirements (including pending verification) for EDC Hub
 export async function getAllRequirements(): Promise<Requirement[]> {
-  return getStoredRequirements();
+  try {
+    return await request<Requirement[]>(`/requirements?includeAll=true`);
+  } catch {
+    return fallbackRequirements;
+  }
 }
 
 export async function getRequirement(id: string): Promise<Requirement | undefined> {
-  const all = getStoredRequirements();
-  return all.find((r) => r.id === id);
+  try {
+    return await request<Requirement>(`/requirements/${id}`);
+  } catch {
+    return fallbackRequirements.find((item) => item.id === id);
+  }
 }
 
 // Founder posts a new requirement -> Starts with "PENDING_APPROVAL" by EDC Cell
 export async function postRequirement(input: NewRequirementInput): Promise<Requirement> {
-  // Auto-derive status from deadline if provided
-  let status: Requirement["status"] = "OPEN";
-  if (input.deadline) {
-    const daysUntilDeadline = Math.ceil(
-      (new Date(input.deadline).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-    );
-    if (daysUntilDeadline <= 7) status = "CLOSING SOON";
-  }
-
-  const requirement: Requirement = {
-    id: `REQ-${Math.floor(Math.random() * 900 + 100)}`,
-    company: input.company,
-    role: input.role,
-    stack: input.stack.split(",").map((s) => s.trim()).filter(Boolean),
-    location: input.location || "Remote",
-    stipend: input.stipend || "Unpaid",
-    status,
-    approvalStatus: "PENDING_APPROVAL",
-    posted: "Just now",
-    postedDate: new Date().toISOString(),
-    founderEmail: input.email,
-    blurb: input.blurb || "No description provided yet.",
-    ...(input.deadline && { deadline: new Date(input.deadline).toISOString() }),
-  };
-
-  const current = getStoredRequirements();
-  const updated = [requirement, ...current];
-  saveStoredRequirements(updated);
-
-  return requirement;
+  const payload = await request<{ data: Requirement; message?: string }>("/requirements", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  // Bust cache so the board re-fetches fresh data
+  invalidateCache("/requirements");
+  invalidateCache("/requirements?includeAll=true");
+  return payload.data ?? payload;
 }
-
 
 // EDC Cell approves a founder requirement -> Makes it live on the student board
 export async function approveRequirement(
   id: string,
   approvedBy = "EDC Incubation Cell"
 ): Promise<Requirement | undefined> {
-  const current = getStoredRequirements();
-  let updatedRequirement: Requirement | undefined;
-
-  const updated = current.map((r) => {
-    if (r.id === id) {
-      updatedRequirement = {
-        ...r,
-        approvalStatus: "APPROVED" as const,
-        approvedBy,
-        approvedAt: "Just now",
-      };
-      return updatedRequirement;
-    }
-    return r;
+  const payload = await request<{ data: Requirement; message?: string }>(`/requirements/${id}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ approvedBy }),
   });
-
-  saveStoredRequirements(updated);
-  return updatedRequirement;
+  invalidateCache("/requirements");
+  invalidateCache("/requirements?includeAll=true");
+  return payload.data;
 }
 
 // EDC Cell rejects a founder requirement
@@ -276,85 +309,42 @@ export async function rejectRequirement(
   id: string,
   reason?: string
 ): Promise<Requirement | undefined> {
-  const current = getStoredRequirements();
-  let updatedRequirement: Requirement | undefined;
-
-  const updated = current.map((r) => {
-    if (r.id === id) {
-      updatedRequirement = {
-        ...r,
-        approvalStatus: "REJECTED" as const,
-        edcNotes: reason || "Does not meet campus incubation requisites.",
-        rejectionReason: reason || "Does not meet campus incubation requisites.",
-      };
-      return updatedRequirement;
-    }
-    return r;
+  const payload = await request<{ data: Requirement; message?: string }>(`/requirements/${id}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
   });
-
-  saveStoredRequirements(updated);
-  return updatedRequirement;
+  invalidateCache("/requirements");
+  invalidateCache("/requirements?includeAll=true");
+  return payload.data;
 }
 
 export async function getStartups(): Promise<Startup[]> {
-  return seedStartups;
+  try {
+    return await request<Startup[]>(`/startups`);
+  } catch {
+    return fallbackStartups;
+  }
 }
 
 export async function getStartup(id: string): Promise<Startup | undefined> {
-  return seedStartups.find((s) => s.id === id);
-}
-
-function getStoredApplications(): Application[] {
-  if (typeof window !== "undefined") {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY_APPLICATIONS);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // fallback
-    }
-  }
-  return [];
-}
-
-function saveStoredApplications(apps: Application[]) {
-  if (typeof window !== "undefined") {
-    try {
-      localStorage.setItem(STORAGE_KEY_APPLICATIONS, JSON.stringify(apps));
-    } catch {
-      // ignore
-    }
+  try {
+    return await request<Startup>(`/startups/${id}`);
+  } catch {
+    return fallbackStartups.find((item) => item.id === id);
   }
 }
 
 // Returns only the applications submitted by the given student email
 export async function getMyApplications(studentEmail: string): Promise<Application[]> {
-  const all = getStoredApplications();
-  return all.filter((a) => a.applicantEmail.toLowerCase() === studentEmail.toLowerCase());
+  const url = `/applications?studentEmail=${encodeURIComponent(studentEmail)}`;
+  return request<Application[]>(url);
 }
 
 // Returns all applications received for requirements posted by this founder email
 export async function getApplicationsByFounder(founderEmail: string, founderCompany?: string): Promise<Application[]> {
-  const allRequirements = getStoredRequirements();
-  // Find all requirement IDs that belong to this founder
-  const founderReqIds = new Set(
-    allRequirements
-      .filter((r) =>
-        r.founderEmail.toLowerCase() === founderEmail.toLowerCase() ||
-        (founderCompany && r.company.toLowerCase() === founderCompany.toLowerCase())
-      )
-      .map((r) => r.id)
-  );
-  const allApplications = getStoredApplications();
-  // Filter strictly: use founderEmail field if present, else fall back to requirementId match
-  return allApplications.filter((a) => {
-    if (a.founderEmail) {
-      return a.founderEmail.toLowerCase() === founderEmail.toLowerCase();
-    }
-    return founderReqIds.has(a.requirementId);
-  });
+  const params = new URLSearchParams({ founderEmail });
+  if (founderCompany) params.set("founderCompany", founderCompany);
+  return request<Application[]>(`/applications?${params.toString()}`);
 }
 
 // Founder updates a candidate's application status
@@ -362,17 +352,11 @@ export async function updateApplicationStatus(
   appId: string,
   status: "Reviewing" | "Interviewing" | "Accepted" | "Selected" | "Rejected"
 ): Promise<Application | undefined> {
-  const all = getStoredApplications();
-  let updated: Application | undefined;
-  const next = all.map((a) => {
-    if (a.id === appId) {
-      updated = { ...a, status };
-      return updated;
-    }
-    return a;
+  const payload = await request<{ data: Application; message?: string }>(`/applications/${appId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
   });
-  saveStoredApplications(next);
-  return updated;
+  return payload.data;
 }
 
 export async function submitApplication(
@@ -392,39 +376,36 @@ export async function submitApplication(
     skills?: string[];
   }
 ): Promise<Application> {
-  // Resolve founderEmail from the requirement if not explicitly passed
-  const allRequirements = getStoredRequirements();
-  const req = allRequirements.find((r) => r.id === requirementId);
-  const resolvedFounderEmail = options?.founderEmail || req?.founderEmail;
+  const payload = await request<{ data: Application; message?: string }>("/applications", {
+    method: "POST",
+    body: JSON.stringify({
+      requirementId,
+      applicantName,
+      applicantEmail,
+      ...options,
+    }),
+  });
+  return payload.data ?? payload;
+}
 
-  const application: Application = {
-    id: `APP-${Math.floor(Math.random() * 9000 + 1000)}`,
-    requirementId,
-    founderEmail: resolvedFounderEmail,
-    applicantName,
-    applicantEmail,
-    roleTitle: options?.roleTitle,
-    companyName: options?.companyName,
-    department: options?.department,
-    college: options?.college,
-    linkedinUrl: options?.linkedinUrl,
-    githubUrl: options?.githubUrl,
-    portfolioUrl: options?.portfolioUrl,
-    skills: options?.skills,
-    note: options?.note,
-    createdAt: new Date().toISOString(),
-  };
+export async function uploadApplicationResume(applicationId: string, file: File): Promise<void> {
+  const upload = await request<{ path: string; token: string }>(`/applications/${applicationId}/resume-upload`, {
+    method: "POST",
+    body: JSON.stringify({ contentType: file.type, fileSize: file.size }),
+  });
 
-  const current = getStoredApplications();
-  // Prevent duplicate applications for same requirement by same student
-  const alreadyApplied = current.some(
-    (a) =>
-      a.requirementId === requirementId &&
-      a.applicantEmail.toLowerCase() === applicantEmail.toLowerCase()
-  );
-  if (!alreadyApplied) {
-    saveStoredApplications([application, ...current]);
-  }
+  const { error } = await supabase.storage
+    .from("application-files")
+    .uploadToSignedUrl(upload.path, upload.token, file, { contentType: file.type, upsert: true });
+  if (error) throw new Error(error.message);
 
-  return application;
+  await request(`/applications/${applicationId}/resume`, {
+    method: "PATCH",
+    body: JSON.stringify({ path: upload.path }),
+  });
+}
+
+export async function getApplicationResumeUrl(applicationId: string): Promise<string> {
+  const payload = await request<{ url: string }>(`/applications/${applicationId}/resume-url`);
+  return payload.url;
 }
